@@ -42,8 +42,9 @@
 #define FPGA_BASE    0x43c00000    // Base address of the HW accelerator
 #endif
 
-#define FPGA_MASK    0x000fffff
-#define FPGA_SIZE    0x00100000
+#define REG_BASE    0x00000000
+#define REG_MASK    0x000fffff
+#define REG_SIZE    0x00100000
 
 #define COMMAND_MASK 0x80000000
 
@@ -65,10 +66,9 @@ int interruptcount = 0;
 /* instance-specific driver-internal data structure */
 static struct fpga_drv_local {
   int irq;
-  unsigned long mem_start;
-  unsigned long mem_end;
-  volatile unsigned int *fpga_ptr;
-  unsigned int offset;
+  unsigned long reg_start;
+  unsigned long reg_end;
+  volatile unsigned int *reg_ptr;
   struct proc_dir_entry *fpga_interrupt_file;
   struct fasync_struct *fasync_fpga_queue ;
 } l;
@@ -90,10 +90,10 @@ static irqreturn_t fpga_int_handler(int irq, void *lp)
 #endif
 
    /* acknowledge/reset the interrupt by clearing the interrup status register */
-   writel(1ul, (volatile unsigned int *)&l.fpga_ptr[3]);
+   writel(1ul, (volatile unsigned int *)&l.reg_ptr[3]);
 
    /* Signal the user application that an interupt occured */
-   kill_fasync(&((struct fpga_drv_local*)lp)->fasync_fpga_queue, SIGIO, POLL_IN);
+   kill_fasync(&l.fasync_fpga_queue, SIGIO, POLL_IN);
 
    return IRQ_HANDLED;
 }
@@ -103,7 +103,6 @@ static irqreturn_t fpga_int_handler(int irq, void *lp)
  * Driver access methods
  */
 
-/* Driver access routines */
 static int fpga_open1 (struct inode *inode, struct file *file) {
    return 0;
 }
@@ -121,35 +120,7 @@ static int fpga_fasync1 (int fd, struct file *filp, int on)
 
 } 
 
-static ssize_t fpga_write1(struct file *filp, const char __user *buf, size_t count, loff_t *offp)
-{
-    int not_copied;
-
-#ifdef DEBUG
-    printk(KERN_INFO "\nfpga_drv: receive write command to fpga \n");
-#endif    
-
-    not_copied = copy_from_user((void *)l.fpga_ptr, buf, count);
-
-    return count - not_copied;
-
-}
-
-static ssize_t fpga_read1(struct file *filp, char __user *buf, size_t count, loff_t *offp)
-{
-    int not_copied;
-
-#ifdef DEBUG
-    printk(KERN_INFO "\nfpga_drv: receive read command from fpga \n");
-#endif    
-
-    not_copied  = copy_to_user(buf, (void *)l.fpga_ptr, count);
-
-    return count - not_copied;
-}
-
-static long fpga_ioctl1(struct file *file, unsigned int cmd, unsigned long arg) {
-
+static long fpga_ioctl1(struct file *file, unsigned int cmd, unsigned long arg){
    int retval = 0;
    unsigned long value;
    unsigned int command_type;
@@ -161,8 +132,8 @@ static long fpga_ioctl1(struct file *file, unsigned int cmd, unsigned long arg) 
 #endif
 
    // Set the offset for register accesses
-   offset = ~COMMAND_MASK & cmd & FPGA_MASK;
-   if(offset > FPGA_SIZE)
+   offset = ~COMMAND_MASK & cmd & REG_MASK;
+   if(offset > REG_SIZE)
       retval=-EINVAL;
 
    command_type = COMMAND_MASK & cmd;
@@ -170,10 +141,10 @@ static long fpga_ioctl1(struct file *file, unsigned int cmd, unsigned long arg) 
    {
       case 0:
          //read
-         if(!access_ok(VERIFY_READ, (unsigned int *)arg, sizeof(int)))
+         if(!access_ok((unsigned int *)arg, sizeof(int)))
             return -EFAULT;
 
-	 value = readl((volatile unsigned int *)&l.fpga_ptr[offset]);
+	 value = readl((volatile unsigned int *)&l.reg_ptr[offset]);
 	 put_user(value, (unsigned long*)arg);
 
 #ifdef DEBUG
@@ -183,9 +154,9 @@ static long fpga_ioctl1(struct file *file, unsigned int cmd, unsigned long arg) 
 
       case COMMAND_MASK:
          //write
-         access_addr = l.fpga_ptr + offset;
+         access_addr = l.reg_ptr + offset;
 
-         if(!access_ok(VERIFY_WRITE, (unsigned int *)arg, sizeof(int)))
+         if(!access_ok((unsigned int *)arg, sizeof(int)))
             return -EFAULT;
 
          get_user(value, (unsigned long *)arg);
@@ -210,8 +181,8 @@ static long fpga_ioctl1(struct file *file, unsigned int cmd, unsigned long arg) 
 struct file_operations fpga_fops = {
    .owner   = THIS_MODULE,
    .llseek  = NULL,
-   .read    = fpga_read1,
-   .write   = fpga_write1,
+   .read    = NULL, /* fpga_read1, */  /* not supported in this example */
+   .write   = NULL, /* fpga_write1, */ /* not supported in this example */
    .iterate = NULL,
    .poll    = NULL,
    .compat_ioctl = NULL,
@@ -252,12 +223,11 @@ static int proc_open_fpga_interrupt(struct inode *inode, struct  file *file) {
 }
 
 /* operations supported on the /proc entry */
-static const struct file_operations proc_fops = {
-  .owner = THIS_MODULE,
-  .open = proc_open_fpga_interrupt,
-  .read = seq_read,
-  .llseek = seq_lseek,
-  .release = single_release,
+static const struct proc_ops proc_ops = {
+  .proc_open = proc_open_fpga_interrupt,
+  .proc_read = seq_read,
+  .proc_lseek = seq_lseek,
+  .proc_release = single_release,
 };
 
 
@@ -277,9 +247,9 @@ static struct miscdevice fpga_miscdev = {
 /* probbe and install module instance for device */
 static int fpga_drv_probe (struct platform_device *pdev) 
 {
-  struct resource *r_irq; /* Interrupt resources */
-  struct resource *r_mem; /* IO mem resources */
-  struct device *dev = &pdev->dev;
+   void __iomem *base;
+   struct resource *r_reg; /* IO register resources */
+   struct device *dev = &pdev->dev;
 
    int rv = -EBUSY;
 
@@ -292,92 +262,63 @@ static int fpga_drv_probe (struct platform_device *pdev)
       return -EBUSY;
    }
 
-   // get memory region assigned to the device
-   r_mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-   if (!r_mem) {
-     dev_err(dev, "fpga_drv: invalid address\n");
-     rv = -ENODEV;
-     goto no_mem;
+   // get, register and remap address region assigned to the device registers
+   base = devm_platform_get_and_ioremap_resource(pdev, 0, &r_reg);
+   if (IS_ERR(base)) {
+     dev_err(dev, "fpga_drv: Unable to map FPGA registers.\n");
+     rv = PTR_ERR(base);
+     goto end;
    }
 
-   l.mem_start = r_mem->start;
-   l.mem_end = r_mem->end;
-
-   // perform memory REMAP
-   if(!request_mem_region(l.mem_start, l.mem_end - l.mem_start + 1, fpga_NAME))
-   {
-      dev_err(dev, "fpga_drv: Unable to acquire FPGA address.\n");
-      goto no_mem;
-   }
-
-   l.fpga_ptr = (volatile unsigned int *)ioremap_nocache(l.mem_start, 
-                                                 l.mem_end - l.mem_start + 1);
-   if (!l.fpga_ptr)
-   {
-      dev_err(dev, "fpga_drv: Unable to map FPGA.\n");
-      goto no_mem;
-   }
+   l.reg_ptr = base;
+   l.reg_start = r_reg->start;
+   l.reg_end = r_reg->end;
 
    dev_info(dev, "fpga_drv: 0x%08lx size 0x%08lx mapped to 0x%08lx\n", 
-            l.mem_start, l.mem_end - l.mem_start + 1, 
-            (unsigned long)l.fpga_ptr);
+            l.reg_start, l.reg_end - l.reg_start + 1, 
+            (unsigned long)l.reg_ptr);
    dev_info(dev, "fpga_drv: using (major, minor) number (10, %d) on %s\n", 
             fpga_miscdev.minor, DRIVER_NAME); 
 
-   // create /proc file system entry
-   l.fpga_interrupt_file = proc_create(DRIVER_NAME, 0444, NULL, &proc_fops);
-   if(l.fpga_interrupt_file == NULL)
-   {
-      dev_err(dev, "fpga_drv: create /proc entry returned NULL. ABORTING!\n");
-      rv = -ENOMEM;
-      goto no_proc;
-   }
-
    // get the interrupt assigned to the device
-   r_irq = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
-   if (!r_irq) {
+   l.irq = platform_get_irq(pdev, 0);
+   if (l.irq < 0) {
      dev_info(dev, "fpga_drv: no IRQ found\n");
-     goto no_fpga_interrupt;
+     rv = l.irq;
+     goto end;
    } 
 
-   l.irq = r_irq->start;
-
    // request interrupt from linux 
-   rv = request_irq(l.irq, &fpga_int_handler, 0, DRIVER_NAME,  &l);
+   rv = devm_request_irq(dev, l.irq, &fpga_int_handler, 0, DRIVER_NAME,  NULL);
    if (rv)
    {
       dev_err(dev, "fpga_drv: Can't get interrupt %d: %d\n", l.irq, rv);
-      goto no_fpga_interrupt;
+      goto end;
    }
 
    dev_info(dev, "fpga_drv: using interrupt %d\n", l.irq);
+
+   // create /proc file system entry
+   l.fpga_interrupt_file = proc_create(DRIVER_NAME, 0444, NULL, &proc_ops);
+   if(l.fpga_interrupt_file == NULL)
+   {
+      dev_err(dev, "fpga_drv: create /proc entry returned NULL. ABORTING!\n");
+      goto end;
+   }
 
    // everything initialized
    dev_info(dev, "fpga_drv: %s %s Initialized\n", fpga_NAME, fpga_VERSION);
    return 0;
 
-   // error handling
-no_fpga_interrupt:
-   remove_proc_entry(DRIVER_NAME, NULL);
-no_proc:
-   release_mem_region(l.mem_start, l.mem_end - l.mem_start + 1);
-no_mem:
+end:
    misc_deregister(&fpga_miscdev);
-   return rv;
+   return rv;  
 }
 
 /* remove driver from kernel */
 static int fpga_drv_remove (struct platform_device *pdev) 
 {
    struct device *dev = &pdev->dev;
-
-   // free interrupt
-   free_irq(l.irq, &l);
-
-   // unmap memory
-   iounmap((void *)l.fpga_ptr);
-   release_mem_region(l.mem_start, l.mem_end - l.mem_start + 1);
-   dev_info(dev, "fpga_drv: Device released.\n");
 
    // de-register driver with kernel
    misc_deregister(&fpga_miscdev);
@@ -418,10 +359,10 @@ static struct platform_driver fpga_driver = {
 /* Resources assigned to device */ 
 static const struct resource fpga_resources[] = {
   {
-    .start= FPGA_BASE,
-    .end=   FPGA_BASE+FPGA_SIZE-1,
+    .start= FPGA_BASE+REG_BASE,
+    .end=   FPGA_BASE+REG_BASE+REG_SIZE-1,
     .flags= IORESOURCE_MEM,
-    .name= "io-memory"
+    .name= "io-regs"
     },
   {
     .start= INTERRUPT,
