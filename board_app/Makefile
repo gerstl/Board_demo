@@ -9,8 +9,8 @@ CCFLAGS	= # -static
 STRIP	= $(PROC)-$(TYPE)-strip
 
 UNAME 	= $(shell uname -r)
-KDIR	= /home/projects/gerstl/ece382m/plnx_kernel
-#KDIR	= /usr/src/plnx_kernel
+#KDIR	= /home/projects/gerstl/ece382m/plnx_kernel
+KDIR	= /usr/src/plnx_kernel
 KFLAGS	= -DDEBUG # -DNO_DTS
 
 obj-m	= fpga_drv.o
