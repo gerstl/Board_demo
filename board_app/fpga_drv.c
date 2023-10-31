@@ -141,11 +141,11 @@ static long fpga_ioctl1(struct file *file, unsigned int cmd, unsigned long arg){
    {
       case 0:
          //read
-         if(!access_ok((unsigned int *)arg, sizeof(int)))
+         if(!access_ok((unsigned int *)arg, sizeof(long)))
             return -EFAULT;
 
-	 value = readl((volatile unsigned int *)&l.reg_ptr[offset]);
-	 put_user(value, (unsigned long*)arg);
+         value = readl((volatile unsigned int *)&l.reg_ptr[offset]);
+         put_user(value, (unsigned long*)arg);
 
 #ifdef DEBUG
          printk("fpga_drv: Read value %08lx\n", value);
@@ -156,7 +156,7 @@ static long fpga_ioctl1(struct file *file, unsigned int cmd, unsigned long arg){
          //write
          access_addr = l.reg_ptr + offset;
 
-         if(!access_ok((unsigned int *)arg, sizeof(int)))
+         if(!access_ok((unsigned int *)arg, sizeof(long)))
             return -EFAULT;
 
          get_user(value, (unsigned long *)arg);

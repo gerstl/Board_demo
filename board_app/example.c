@@ -8,6 +8,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <assert.h>
+#include <err.h>
 
 #define READ_CMD  (0x0 << 31)
 #define WRITE_CMD (0x1 << 31)
@@ -29,8 +30,8 @@ void sighandler(int signo)
 
 int main(int argc, char * argv[]) 
 {
-  unsigned long volatile trig, val_A, val_B, result;
-  unsigned long volatile gie, iie;
+  unsigned long trig, val_A, val_B, result;
+  unsigned long iie, gie;
   struct sigaction action;
   int fd;
 
@@ -62,34 +63,34 @@ int main(int argc, char * argv[])
   fcntl(fd, F_SETFL, fcntl(fd, F_GETFL)|O_ASYNC);
 
   // enable FPGA interrupts (global and IP)
-  ioctl(fd, READ_CMD + 0x1, &gie);
+  if(ioctl(fd, READ_CMD + 0x1, &gie)) err(1, "Getting GIE");
   gie = gie | 0x00000001;
-  ioctl(fd, WRITE_CMD + 0x1, &gie);
+  if(ioctl(fd, WRITE_CMD + 0x1, &gie)) err(1, "Setting GIE");
 
   iie = 0x1;
-  ioctl(fd, WRITE_CMD + 0x2, &iie);
+  if(ioctl(fd, WRITE_CMD + 0x2, &iie)) err(1, "Setting IIE");
 
   // perform C += A*B;
   val_A = atol(argv[1]);
   val_B = atol(argv[2]);
 
   // write A
-  ioctl(fd, WRITE_CMD + 0x4, &val_A);
+  if(ioctl(fd, WRITE_CMD + 0x4, &val_A)) err(1, "Writing A");
   printf("A is %lu\n", val_A);
   
   // write B
-  ioctl(fd, WRITE_CMD + 0x6, &val_B);
+  if(ioctl(fd, WRITE_CMD + 0x6, &val_B)) err(1, "Writing B");
   printf("B is %lu\n", val_B);
   
   // trigger MAC operation
   trig = 0x1;
-  ioctl(fd, WRITE_CMD, &trig);
+  if(ioctl(fd, WRITE_CMD, &trig)) err(1, "Trigger");
 
   // wait for interrupt
   while(!det_int) continue;
 
   // read result
-  ioctl(fd, READ_CMD + 0x8, &result);
+  if(ioctl(fd, READ_CMD + 0x8, &result)) err(1, "Read result");
 
   printf("C += A*B is %lu\n", result);
 
